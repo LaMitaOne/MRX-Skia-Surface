@@ -1,5 +1,8 @@
 # MRX-Skia-Surface
-An experimental module rendering engine for Delphi (FMX), powered by Skia4Delphi and FFmpeg.
+An experimental module rendering engine for Delphi (FMX), powered by Skia4Delphi and FFmpeg.  
+   
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LaMitaOne/MRX-Skia-Surface)   
+   
 
 Instead of using standard FMX controls, this provides a generic TMRXDesktopObject base class. The surface manages these objects in a background thread, handling Z-Index layering, hit-testing, and smooth Lerp animations.
 Current State
