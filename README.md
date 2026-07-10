@@ -14,6 +14,7 @@ So far working:
      Video dblclick animated zoom to fullscreen and back
      Dragging of modules
      Mouseover HotZoom
+     Shadows   
      Z-Order layering
        
 <img width="1183" height="748" alt="Unbenannt" src="https://github.com/user-attachments/assets/a356c461-2a2b-4545-b1c5-ec4c49980bb0" />
