@@ -1,0 +1,16 @@
+object FMaster: TFMaster
+  Left = 0
+  Top = 0
+  Caption = 'MRX Skia Surface'
+  ClientHeight = 718
+  ClientWidth = 1185
+  FormFactor.Width = 320
+  FormFactor.Height = 480
+  FormFactor.Devices = [Desktop]
+  OnCreate = FormCreate
+  DesignerMasterStyle = 0
+  object OpenDialog1: TOpenDialog
+    Left = 176
+    Top = 120
+  end
+end
