@@ -21,3 +21,7 @@ requirements
      Delphi (RAD Studio)
      Skia4Delphi
      FFmpeg DLLs v8.1 or newer (libavcodec, libavformat, libswscale, libavutil)
+
+project and zipped sample exe included (but you need to get the dlls self, they are way too big :P)   
+
+   https://www.gyan.dev/ffmpeg/builds/  
