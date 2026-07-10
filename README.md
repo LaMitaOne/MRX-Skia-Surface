@@ -9,7 +9,10 @@ Current State
 
 (Prototype - Work in Progress, playing around :D)
 
-Right now, this is an active testing ground. The core threading, the Z-Index logic, and the basic compositing (with dynamic drop shadows and alpha-blending) work. Video playback is integrated to test how heavy, continuously updating modules behave alongside transparent UI widgets.
+Right now, this is an active testing ground. The core threading, the Z-Index logic, and the basic compositing (with dynamic drop shadows and alpha-blending) work. Video playback is integrated to test how heavy, continuously updating modules behave alongside transparent UI widgets.  
+   
+<img width="1183" height="748" alt="Unbenannt" src="https://github.com/user-attachments/assets/a356c461-2a2b-4545-b1c5-ec4c49980bb0" />
+   
 
 So far working:
 
@@ -20,8 +23,7 @@ So far working:
      Shadows   
      Z-Order layering
        
-<img width="1183" height="748" alt="Unbenannt" src="https://github.com/user-attachments/assets/a356c461-2a2b-4545-b1c5-ec4c49980bb0" />
-    
+ 
 requirements
 
      Delphi (RAD Studio)
