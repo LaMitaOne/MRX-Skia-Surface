@@ -33,6 +33,7 @@ requirements
 project and zipped sample exe included (but you need to get the dlls self, they are way too big :P)   
 
    https://www.gyan.dev/ffmpeg/builds/    
+ - take those: ffmpeg-release-full-shared
    
 ffmpeg units from:   
    https://github.com/Laex/Delphi-FFMPEG
