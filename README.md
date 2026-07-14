@@ -17,11 +17,12 @@ Right now, this is an active testing ground. The core threading, the Z-Index log
 So far working:
 
      Start video playback (click on black module)
-     Video dblclick animated zoom to fullscreen and back
+     dblclick animated zoom to fullscreen and back
      Dragging of modules
      Mouseover HotZoom
      Shadows   
-     Z-Order layering
+     Z-Order layering  
+     Entry animations 
        
 
  ----Latest Changes   
