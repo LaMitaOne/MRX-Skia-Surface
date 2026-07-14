@@ -23,7 +23,23 @@ So far working:
      Shadows   
      Z-Order layering
        
- 
+
+ ----Latest Changes   
+   v 0.2   
+    - Replaced static Enum Z-Indexing with dynamic Integer Z-Ordering.    
+    - Added logic to elevate modules to Z_ORDER_FULLSCREEN dynamically.    
+    - Implemented precise Z-Order aware HitTesting for mouse interactions.    
+    - Switched dragging from eased TargetPosition to direct 1:1 Pos tracking.    
+    - Added FForcePhysicsUpdate flag to keep state loops alive (Video frames).    
+    - Refined entry animation physics for smoother edge-slide-in transitions.    
+    - Added TMRXTopInfoModule to handle cinematic black-curtain intro sequence.    
+    - Modules now start hidden (Visible := False) and are triggered by TopInfo.    
+    - Implemented TMRXEntryStyle (esFromEdge) to auto-detect closest screen edge.    
+    - TMRXControls locked out of Fullscreen transitions but kept above Video layer.    
+    - TMRXPlaylist disables dragging and HotZoom when in SideBarMode.    
+    - Stripped redundant physics code from TMRXVideo, now fully driven by base class.    
+    
+    
 requirements
 
      Delphi (RAD Studio)
