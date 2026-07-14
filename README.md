@@ -38,7 +38,8 @@ So far working:
     - Implemented TMRXEntryStyle (esFromEdge) to auto-detect closest screen edge.    
     - TMRXControls locked out of Fullscreen transitions but kept above Video layer.    
     - TMRXPlaylist disables dragging and HotZoom when in SideBarMode.    
-    - Stripped redundant physics code from TMRXVideo, now fully driven by base class.    
+    - Stripped redundant physics code from TMRXVideo, now fully driven by base class.   
+    - and i forgot what all else :D   
     
     
 requirements
