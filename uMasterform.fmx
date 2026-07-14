@@ -8,6 +8,7 @@ object FMaster: TFMaster
   FormFactor.Height = 480
   FormFactor.Devices = [Desktop]
   OnCreate = FormCreate
+  OnShow = FormShow
   DesignerMasterStyle = 0
   object OpenDialog1: TOpenDialog
     Left = 176

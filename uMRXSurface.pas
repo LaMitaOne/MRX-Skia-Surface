@@ -1,3 +1,47 @@
+{*******************************************************************************
+  uMRXSurface
+********************************************************************************
+  A high-performance, offscreen-rendered desktop environment for Delphi FMX.
+  Built natively on Skia4Delphi.
+
+  Core Architecture:
+  - Custom double-buffered render loop running on a dedicated background thread.
+  - Dynamic Z-Ordering system allowing runtime layer elevation (e.g., Fullscreen).
+  - Centralized physics pipeline managing smooth position/size interpolations.
+
+  Key Features:
+  - Completely decoupled from the standard FMX layout engine to prevent flicker.
+  - Thread-safe object management and backbuffer swapping.
+  - Automated hover-state tracking with HotZoom physics.
+  - Zero-lag direct mouse dragging with precise offset tracking.
+*******************************************************************************}
+{ MRX Desktop Environment v0.2 alpha                                            }
+{ Architecture & Rendering Core                                                 }
+{                                                                              }
+{------------------------------------------------------------------------------}
+{ by Lara Miriam Tamy Reschke                                                  }
+{                                                                              }
+{ larate@gmx.net                                                               }
+{ https://lamita.jimdosite.com                                                 }
+{                                                                              }
+{------------------------------------------------------------------------------}
+{
+ ----Latest Changes
+   v 0.2
+    - Replaced static Enum Z-Indexing with dynamic Integer Z-Ordering.
+    - Added logic to elevate modules to Z_ORDER_FULLSCREEN dynamically.
+    - Implemented precise Z-Order aware HitTesting for mouse interactions.
+    - Switched dragging from eased TargetPosition to direct 1:1 Pos tracking.
+    - Added FForcePhysicsUpdate flag to keep state loops alive (Video frames).
+    - Refined entry animation physics for smoother edge-slide-in transitions.
+    - Added TMRXTopInfoModule to handle cinematic black-curtain intro sequence.
+    - Modules now start hidden (Visible := False) and are triggered by TopInfo.
+    - Implemented TMRXEntryStyle (esFromEdge) to auto-detect closest screen edge.
+    - TMRXControls locked out of Fullscreen transitions but kept above Video layer.
+    - TMRXPlaylist disables dragging and HotZoom when in SideBarMode.
+    - Stripped redundant physics code from TMRXVideo, now fully driven by base class.
+}
+
 unit uMRXSurface;
 
 interface
@@ -5,15 +49,24 @@ interface
 uses
   System.SysUtils, System.Types, System.Classes, System.Math, System.UITypes,
   System.SyncObjs, System.Generics.Collections, System.Generics.Defaults,
-  FMX.Types, FMX.Controls, FMX.Skia, System.Skia, uFFmpegPipeline;
+  FMX.Types, FMX.Controls, FMX.Skia, FMX.Platform.Win, System.Skia;
+
+const
+  // Dynamic Z-Ordering constants to dictate render hierarchy at runtime.
+  // Modules can change their ZOrder dynamically (e.g., jumping to FULLSCREEN when maximized).
+  Z_ORDER_BACKGROUND = 10;
+  Z_ORDER_VIDEO = 20;
+  Z_ORDER_CONTROLS = 51; // Renders above video, but below fullscreen modules
+  Z_ORDER_FULLSCREEN = 50; // Any module transitioning to fullscreen claims this layer
+  Z_ORDER_SIDEBAR = 80; // Reserved for panels locked to screen edges
+  Z_ORDER_TOPINFO = 100; // Ultimate top layer for intro overlays
 
 type
   TMRXSkiaSurface = class;
 
-  // Defines the visual layering of modules
-  TMRXZIndex = (zuiBackground, zuiVideo, zuiOverlay);
-
   TMRXRedrawReason = (rrNone, rrInternal, rrDragged, rrHotZoom, rrFullscreen);
+
+  TMRXEntryStyle = (esNone, esFromLeft, esFromRight, esFromTop, esFromBottom, esFromEdge);
 
   { ==========================================================================
     MRX Desktop Objects (Base Class)
@@ -27,18 +80,59 @@ type
     FVisible: Boolean;
     FIsAnimating: Boolean;
     FCornerRadius: Single;
+  protected
     FBackgroundAlpha: Byte;
     FActualHotZoom: Single;
     FHotZoomTarget: Single;
-    FZIndex: TMRXZIndex; // Determines draw order
+    FZOrder: Integer;
+
+    // Individual module backbuffer to cache internal state (like video frames or text)
+    FRenderCache: ISkImage;
+
+    // Flag to keep the physics loop running even when stationary (used by video playback)
+    FForcePhysicsUpdate: Boolean;
+
+    // Entry animation state
+    FEntryStyle: TMRXEntryStyle;
+    FEntryProgress: Single;
+    FIsEntering: Boolean;
+    FStartOffset: TPointF;
+
+    // Smooth motion and fullscreen state
+    FIsFullscreen: Boolean;
+    FSmallRect: TRectF;
+    FTargetPosition: TPointF;
+    FActualPosition: TPointF;
+    FTargetSize: TSizeF;
+    FActualSize: TSizeF;
+
+    procedure SetTargetPosition(const Value: TPointF);
+    procedure SetTargetSize(const Value: TSizeF);
+
+    // Evaluates target position to determine the optimal off-screen starting point
+    procedure CalculateStartOffset;
   public
     constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); virtual;
     destructor Destroy; override;
 
     procedure MarkDirty(AReason: TMRXRedrawReason = rrInternal);
     procedure Draw(const ACanvas: ISkCanvas); virtual; abstract;
-    procedure UpdateHotZoom(const DeltaTime: Double);
 
+    // Core animation loop methods called by the render thread
+    procedure UpdateHotZoom(const DeltaTime: Double); virtual;
+    procedure UpdatePhysics(const DeltaTime: Double); virtual;
+    procedure ApplyDrag(const ANewPos: TPointF); virtual;
+
+    // Modules override this to define where they sit when maximized
+    function GetFullscreenZOrder: Integer; virtual;
+
+    // Triggers the slide-in animation from outside the screen bounds
+    procedure InitEntryAnimation(AStyle: TMRXEntryStyle); virtual;
+
+    // Toggles between normal bounds and desktop-sized fullscreen
+    procedure ToggleFullscreen; virtual;
+
+    // Simple rectangular hit test for mouse interactions
     function HitTest(const APoint: TPointF): Boolean;
 
     property Surface: TMRXSkiaSurface read FSurface;
@@ -51,51 +145,13 @@ type
     property BackgroundAlpha: Byte read FBackgroundAlpha write FBackgroundAlpha;
     property HotZoomTarget: Single read FHotZoomTarget write FHotZoomTarget;
     property ActualHotZoom: Single read FActualHotZoom;
-    property ZIndex: TMRXZIndex read FZIndex write FZIndex default zuiBackground;
-  end;
+    property ZOrder: Integer read FZOrder write FZOrder default Z_ORDER_BACKGROUND;
 
-  { ==========================================================================
-    Standard UI Modules (Background Layer)
-    ========================================================================== }
-  TMRXAppIcon = class(TMRXDesktopObject)
-  public
-    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
-    procedure Draw(const ACanvas: ISkCanvas); override;
-  end;
-
-  TMRXCover = class(TMRXDesktopObject)
-  public
-    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
-    procedure Draw(const ACanvas: ISkCanvas); override;
-  end;
-
-  TMRXInfos = class(TMRXDesktopObject)
-  public
-    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
-    procedure Draw(const ACanvas: ISkCanvas); override;
-  end;
-
-  { ==========================================================================
-    TMRXPlaylist (Can be Background or Overlay via SideBarMode)
-    ========================================================================== }
-  TMRXPlaylist = class(TMRXDesktopObject)
-  private
-    FSideBarMode: Boolean;
-    procedure SetSideBarMode(const Value: Boolean);
-  public
-    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
-    procedure Draw(const ACanvas: ISkCanvas); override;
-
-    property SideBarMode: Boolean read FSideBarMode write SetSideBarMode default False;
-  end;
-
-  { ==========================================================================
-    TMRXControls (Always Overlay Layer)
-    ========================================================================== }
-  TMRXControls = class(TMRXDesktopObject)
-  public
-    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
-    procedure Draw(const ACanvas: ISkCanvas); override;
+    property TargetPosition: TPointF read FTargetPosition write SetTargetPosition;
+    property ActualPosition: TPointF read FActualPosition;
+    property TargetSize: TSizeF read FTargetSize write SetTargetSize;
+    property ActualSize: TSizeF read FActualSize;
+    property IsFullscreen: Boolean read FIsFullscreen;
   end;
 
   { ==========================================================================
@@ -110,8 +166,10 @@ type
     FThreadActive: Boolean;
     FPaused: Boolean;
 
+    // Double buffering via Skia offscreen surface
     FBackBuffer: ISkImage;
     FThreadSurface: ISkSurface;
+    FGRContext: IGrDirectContext;
     FLastRenderedW: Integer;
     FLastRenderedH: Integer;
 
@@ -121,6 +179,7 @@ type
     FDesktopColor: TAlphaColor;
     FWallpaper: ISkImage;
 
+    // Mouse drag interaction state
     FIsDragging: Boolean;
     FDragObject: TMRXDesktopObject;
     FDragOffset: TPointF;
@@ -153,6 +212,7 @@ type
     procedure RemoveObject(AObj: TMRXDesktopObject);
     procedure ForceFullRedraw;
 
+    // Returns the top-most visible object at a given coordinate
     function GetObjectAtPos(const APoint: TPointF): TMRXDesktopObject;
 
     procedure SetWallpaperFromFile(const AFileName: string);
@@ -167,59 +227,10 @@ type
     property DesktopColor: TAlphaColor read FDesktopColor write SetDesktopColor default $FF1A1A1A;
   end;
 
-  { ==========================================================================
-    TMRXVideo (Video Layer)
-    ========================================================================== }
-  TMRXVideo = class(TMRXDesktopObject)
-  private
-    FActualPosition: TPointF;
-    FTargetPosition: TPointF;
-    FActualSize: TSizeF;
-    FTargetSize: TSizeF;
-    FHotZoom: Single;
-    FMediaPath: string;
-    FIsFullscreen: Boolean;
-    FSmallRect: TRectF;
-
-    FPipeline: TFFmpegPipeline;
-    FCurrentFrame: ISkImage;
-    FIsPlaying: Boolean;
-    FVolume: Single;
-
-    procedure SetTargetPosition(const Value: TPointF);
-    procedure SetTargetSize(const Value: TSizeF);
-    procedure SetHotZoom(Value: Single);
-    procedure SetMediaPath(const Value: string);
-    procedure SetVolume(const Value: Single);
-  public
-    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
-    destructor Destroy; override;
-    procedure Draw(const ACanvas: ISkCanvas); override;
-    procedure UpdatePhysics(const DeltaTime: Double);
-    procedure ToggleFullscreen;
-
-    procedure PlayMediaFile(const APath: string);
-    procedure Stop;
-
-    property ActualPosition: TPointF read FActualPosition;
-    property TargetPosition: TPointF read FTargetPosition write SetTargetPosition;
-    property ActualSize: TSizeF read FActualSize;
-    property TargetSize: TSizeF read FTargetSize write SetTargetSize;
-    property HotZoom: Single read FHotZoom write SetHotZoom;
-    property MediaPath: string read FMediaPath write SetMediaPath;
-    property IsFullscreen: Boolean read FIsFullscreen write FIsFullscreen;
-
-    property IsPlaying: Boolean read FIsPlaying;
-    property Volume: Single read FVolume write SetVolume;
-  end;
-
 implementation
 
-{ ============================================================================= }
-{ Custom Z-Index Sorter for rendering order                                           }
-{ ============================================================================= }
-
 type
+  // Custom sorter to arrange the render queue based on dynamic ZOrder values
   TMRXObjectSorter = class(TComparer<TMRXDesktopObject>)
   public
     function Compare(const Left, Right: TMRXDesktopObject): Integer; override;
@@ -227,8 +238,8 @@ type
 
 function TMRXObjectSorter.Compare(const Left, Right: TMRXDesktopObject): Integer;
 begin
-  // Lower ZIndex gets drawn first (Background -> Video -> Overlay)
-  Result := Ord(Left.ZIndex) - Ord(Right.ZIndex);
+  // Lower ZOrder values are drawn first, higher values draw on top
+  Result := Left.FZOrder - Right.FZOrder;
 end;
 
 {==============================================================================
@@ -241,6 +252,13 @@ begin
   FSurface := ASurface;
   FPosition := APos;
   FSize := ASize;
+
+  // Initialize smooth motion targets to the creation position
+  FActualPosition := APos;
+  FTargetPosition := APos;
+  FActualSize := ASize;
+  FTargetSize := ASize;
+
   FVisible := True;
   FIsAnimating := False;
   FRedrawReason := rrInternal;
@@ -248,11 +266,22 @@ begin
   FBackgroundAlpha := 180;
   FActualHotZoom := 1.0;
   FHotZoomTarget := 1.0;
-  FZIndex := zuiBackground; // Default to back
+  FZOrder := Z_ORDER_BACKGROUND;
+
+  // Initialize entry animation to a completed state
+  FEntryStyle := esNone;
+  FEntryProgress := 1.0;
+  FIsEntering := False;
+  FStartOffset := TPointF.Create(0, 0);
+
+  // Store initial bounds to restore from fullscreen later
+  FIsFullscreen := False;
+  FSmallRect := RectF(APos.X, APos.Y, APos.X + ASize.Width, APos.Y + ASize.Height);
 end;
 
 destructor TMRXDesktopObject.Destroy;
 begin
+  // Ensure the desktop redraws the area where this object was located
   if Assigned(FSurface) then
     FSurface.ForceFullRedraw;
   inherited;
@@ -263,29 +292,242 @@ begin
   FRedrawReason := AReason;
 end;
 
+function TMRXDesktopObject.GetFullscreenZOrder: Integer;
+begin
+  // By default, standard modules claim the dedicated fullscreen layer
+  Result := Z_ORDER_FULLSCREEN;
+end;
+
+procedure TMRXDesktopObject.SetTargetPosition(const Value: TPointF);
+begin
+  if FTargetPosition <> Value then
+  begin
+    FTargetPosition := Value;
+    IsAnimating := True;
+    MarkDirty(rrDragged);
+  end;
+end;
+
+procedure TMRXDesktopObject.SetTargetSize(const Value: TSizeF);
+begin
+  if FTargetSize <> Value then
+  begin
+    FTargetSize := Value;
+    IsAnimating := True;
+    MarkDirty(rrFullscreen);
+  end;
+end;
+
+procedure TMRXDesktopObject.CalculateStartOffset;
+var
+  DesktopW, DesktopH: Single;
+begin
+  if not Assigned(Surface) then
+    Exit;
+  DesktopW := Surface.Width;
+  DesktopH := Surface.Height;
+
+  if FEntryStyle = esFromEdge then
+  begin
+    // Automatically determine the closest edge based on the final target coordinates
+    if FTargetPosition.X > (DesktopW / 2) then
+      FStartOffset.X := DesktopW
+    else if FTargetPosition.X < (DesktopW / 2) then
+      FStartOffset.X := -Size.Width;
+
+    if FTargetPosition.Y > (DesktopH / 2) then
+      FStartOffset.Y := DesktopH
+    else if FTargetPosition.Y < (DesktopH / 2) then
+      FStartOffset.Y := -Size.Height;
+  end
+  else
+  begin
+    // Apply explicit directional offsets
+    case FEntryStyle of
+      esFromLeft:
+        FStartOffset := TPointF.Create(-Size.Width, 0);
+      esFromRight:
+        FStartOffset := TPointF.Create(DesktopW, 0);
+      esFromTop:
+        FStartOffset := TPointF.Create(0, -Size.Height);
+      esFromBottom:
+        FStartOffset := TPointF.Create(0, DesktopH);
+    end;
+  end;
+end;
+
+procedure TMRXDesktopObject.InitEntryAnimation(AStyle: TMRXEntryStyle);
+begin
+  FEntryStyle := AStyle;
+  if FEntryStyle = esNone then
+    Exit;
+
+  FEntryProgress := 0.0;
+  FIsEntering := True;
+  IsAnimating := True;
+
+  CalculateStartOffset;
+  MarkDirty(rrInternal);
+end;
+
+procedure TMRXDesktopObject.ToggleFullscreen;
+var
+  DesktopW, DesktopH: Single;
+begin
+  if not Assigned(Surface) then
+    Exit;
+  DesktopW := Surface.Width;
+  DesktopH := Surface.Height;
+
+  if not FIsFullscreen then
+  begin
+    FIsFullscreen := True;
+    FSmallRect := RectF(FActualPosition.X, FActualPosition.Y, FActualPosition.X + FActualSize.Width, FActualPosition.Y + FActualSize.Height);
+
+    // Force it to strictly one layer BELOW controls/sidebars, but above EVERYTHING else
+    if FZOrder < Z_ORDER_FULLSCREEN then
+      FZOrder := Z_ORDER_FULLSCREEN - 1;
+
+    TargetPosition := TPointF.Create(0, 0);
+    TargetSize := TSizeF.Create(DesktopW, DesktopH);
+  end
+  else
+  begin
+    FIsFullscreen := False;
+
+    if not IsAnimating then
+      FZOrder := Z_ORDER_BACKGROUND;
+
+    TargetPosition := TPointF.Create(FSmallRect.Left, FSmallRect.Top);
+    TargetSize := TSizeF.Create(FSmallRect.Width, FSmallRect.Height);
+  end;
+end;
+
 procedure TMRXDesktopObject.UpdateHotZoom(const DeltaTime: Double);
 var
   Speed: Single;
 begin
-  // --- ANTI-HOVER LOGIC ---
-  if (Self is TMRXVideo) and TMRXVideo(Self).IsFullscreen then
+  // Disable hover scaling while in fullscreen mode
+  if FIsFullscreen then
     Exit;
-  if (Self is TMRXPlaylist) and TMRXPlaylist(Self).SideBarMode then
-    Exit;
-  if (Self is TMRXControls) then
-    Exit;
-  // -----------------------
 
   if not SameValue(FActualHotZoom, FHotZoomTarget, 0.001) then
   begin
     Speed := 4.0 * DeltaTime;
     FActualHotZoom := FActualHotZoom + (FHotZoomTarget - FActualHotZoom) * Speed;
-
     if Abs(FActualHotZoom - FHotZoomTarget) < 0.005 then
       FActualHotZoom := FHotZoomTarget;
-
     MarkDirty(rrHotZoom);
   end;
+end;
+
+procedure TMRXDesktopObject.UpdatePhysics(const DeltaTime: Double);
+var
+  Speed, PosEpsilon, SizeEpsilon, MaxW, MaxH: Single;
+  CurrentOffset: TPointF;
+  PosReached, SizeReached: Boolean;
+begin
+  // Phase 1: Evaluate slide-in entry animation
+  if FIsEntering then
+  begin
+    Speed := 0.8 * DeltaTime;
+    FEntryProgress := FEntryProgress + Speed;
+
+    if FEntryProgress >= 1.0 then
+    begin
+      FEntryProgress := 1.0;
+      FIsEntering := False;
+    end;
+
+    // Calculate interpolated offset from the starting edge
+    CurrentOffset.X := FStartOffset.X * (1.0 - FEntryProgress);
+    CurrentOffset.Y := FStartOffset.Y * (1.0 - FEntryProgress);
+
+    FActualPosition.X := FTargetPosition.X + CurrentOffset.X;
+    FActualPosition.Y := FTargetPosition.Y + CurrentOffset.Y;
+    FActualSize := FTargetSize;
+
+    Pos := FActualPosition;
+    Size := FActualSize;
+    MarkDirty(rrInternal);
+
+    if FIsEntering then
+      Exit;
+  end;
+
+  // Phase 2: Standard position and size interpolation (easing)
+  if Assigned(Surface) then
+  begin
+    MaxW := Surface.Width;
+    MaxH := Surface.Height;
+  end
+  else
+  begin
+    MaxW := 320;
+    MaxH := 240;
+  end;
+
+  Speed := 6.0 * DeltaTime;
+  PosEpsilon := 0.5;
+  SizeEpsilon := 1.0;
+
+  PosReached := SameValue(FActualPosition.X, FTargetPosition.X, PosEpsilon) and SameValue(FActualPosition.Y, FTargetPosition.Y, PosEpsilon);
+  SizeReached := SameValue(FActualSize.Width, FTargetSize.Width, SizeEpsilon) and SameValue(FActualSize.Height, FTargetSize.Height, SizeEpsilon);
+
+  if not PosReached then
+  begin
+    FActualPosition.X := FActualPosition.X + (FTargetPosition.X - FActualPosition.X) * Speed;
+    FActualPosition.Y := FActualPosition.Y + (FTargetPosition.Y - FActualPosition.Y) * Speed;
+  end
+  else
+  begin
+    FActualPosition.X := FTargetPosition.X;
+    FActualPosition.Y := FTargetPosition.Y;
+  end;
+
+  if not SizeReached then
+  begin
+    FActualSize.Width := FActualSize.Width + (FTargetSize.Width - FActualSize.Width) * Speed;
+    FActualSize.Height := FActualSize.Height + (FTargetSize.Height - FActualSize.Height) * Speed;
+  end
+  else
+  begin
+    FActualSize.Width := FTargetSize.Width;
+    FActualSize.Height := FTargetSize.Height;
+  end;
+
+  // Clamp coordinates to prevent rendering outside desktop bounds
+  if FActualPosition.X < 0 then
+    FActualPosition.X := 0;
+  if FActualPosition.Y < 0 then
+    FActualPosition.Y := 0;
+  if FActualSize.Width > MaxW then
+    FActualSize.Width := MaxW;
+  if FActualSize.Height > MaxH then
+    FActualSize.Height := MaxH;
+
+  Pos := FActualPosition;
+  Size := FActualSize;
+
+  // Conclude animation state unless a derived class requires continuous updates
+  if PosReached and SizeReached and not FForcePhysicsUpdate then
+    IsAnimating := False
+  else
+    MarkDirty(rrDragged);
+end;
+
+procedure TMRXDesktopObject.ApplyDrag(const ANewPos: TPointF);
+begin
+  // Prevent dragging while expanded to fullscreen
+  if FIsFullscreen then
+    Exit;
+
+  // Prevent dragging during active position/size transitions to avoid jittering
+  if IsAnimating then
+    Exit;
+
+  TargetPosition := ANewPos;
+  MarkDirty(rrDragged);
 end;
 
 function TMRXDesktopObject.HitTest(const APoint: TPointF): Boolean;
@@ -295,175 +537,6 @@ begin
   R := RectF(Pos.X, Pos.Y, Pos.X + Size.Width, Pos.Y + Size.Height);
   Result := R.Contains(APoint);
 end;
-
-{==============================================================================
-  Background Modules (zuiBackground)
-==============================================================================}
-
-constructor TMRXAppIcon.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
-begin
-  inherited;
-end;
-
-procedure TMRXAppIcon.Draw(const ACanvas: ISkCanvas);
-var
-  R: TRectF;
-  Paint: ISkPaint;
-  RndRect: ISkRoundRect;
-begin
-  R := RectF(0, 0, Size.Width, Size.Height);
-  Paint := TSkPaint.Create;
-  Paint.SetARGB(255, $35, $35, $00);
-  Paint.AntiAlias := True;
-  Paint.Alpha := FBackgroundAlpha;
-  RndRect := TSkRoundRect.Create(R, CornerRadius, CornerRadius);
-  ACanvas.DrawRoundRect(RndRect, Paint);
-  RedrawReason := rrNone;
-end;
-
-constructor TMRXCover.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
-begin
-  inherited;
-end;
-
-procedure TMRXCover.Draw(const ACanvas: ISkCanvas);
-var
-  R: TRectF;
-  Paint: ISkPaint;
-  RndRect: ISkRoundRect;
-begin
-  R := RectF(0, 0, Size.Width, Size.Height);
-  Paint := TSkPaint.Create;
-  Paint.SetARGB(255, $00, $25, $35);
-  Paint.Alpha := FBackgroundAlpha;
-  Paint.AntiAlias := True;
-  RndRect := TSkRoundRect.Create(R, CornerRadius, CornerRadius);
-  ACanvas.DrawRoundRect(RndRect, Paint);
-  RedrawReason := rrNone;
-end;
-
-constructor TMRXInfos.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
-begin
-  inherited;
-end;
-
-procedure TMRXInfos.Draw(const ACanvas: ISkCanvas);
-var
-  R: TRectF;
-  Paint: ISkPaint;
-  RndRect: ISkRoundRect;
-begin
-  R := RectF(0, 0, Size.Width, Size.Height);
-  Paint := TSkPaint.Create;
-  Paint.SetARGB(255, $1A, $00, $25);
-  Paint.Alpha := FBackgroundAlpha;
-  Paint.AntiAlias := True;
-  RndRect := TSkRoundRect.Create(R, CornerRadius, CornerRadius);
-  ACanvas.DrawRoundRect(RndRect, Paint);
-  RedrawReason := rrNone;
-end;
-
-{==============================================================================
-  TMRXPlaylist (Dynamic Z-Index based on SideBarMode)
-==============================================================================}
-
-constructor TMRXPlaylist.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
-begin
-  inherited;
-end;
-
-procedure TMRXPlaylist.SetSideBarMode(const Value: Boolean);
-begin
-  if FSideBarMode <> Value then
-  begin
-    FSideBarMode := Value;
-    // Dynamically change layer so it renders above video when true
-    if FSideBarMode then
-      ZIndex := zuiOverlay
-    else
-      ZIndex := zuiBackground;
-
-    MarkDirty(rrInternal);
-  end;
-end;
-
-procedure TMRXPlaylist.Draw(const ACanvas: ISkCanvas);
-var
-  R: TRectF;
-  Paint: ISkPaint;
-  RndRect: ISkRoundRect;
-  ShadowFilter: ISkImageFilter;
-  LayerPaint: ISkPaint;
-  LayerBounds: TRectF;
-  ZoomFactor: Single;
-begin
-  ZoomFactor := ActualHotZoom;
-  R := RectF(0, 0, Size.Width, Size.Height);
-
-  // Draw shadow if hovered
-  if ZoomFactor > 1.01 then
-  begin
-    LayerPaint := TSkPaint.Create;
-    LayerPaint.Color := TAlphaColors.White;
-    LayerPaint.Alpha := 255;
-
-    LayerBounds := R;
-    LayerBounds.Inflate(50, 50);
-    ACanvas.SaveLayer(LayerBounds, LayerPaint);
-
-    ShadowFilter := TSkImageFilter.MakeDropShadow(0, (ZoomFactor - 1.0) * 50, (ZoomFactor - 1.0) * 40, (ZoomFactor - 1.0) * 40, TAlphaColors.Black, nil);
-
-    Paint := TSkPaint.Create;
-    Paint.ImageFilter := ShadowFilter;
-    Paint.Style := TSkPaintStyle.Fill;
-    Paint.Color := TAlphaColors.Black;
-    Paint.AntiAlias := True;
-
-    RndRect := TSkRoundRect.Create(R, CornerRadius, CornerRadius);
-    ACanvas.DrawRoundRect(RndRect, Paint);
-    ACanvas.ClipRoundRect(RndRect, TSkClipOp.Intersect, True);
-  end;
-
-  // Draw background
-  Paint := TSkPaint.Create;
-  Paint.SetARGB(255, $25, $25, $25);
-  Paint.Alpha := FBackgroundAlpha;
-  Paint.AntiAlias := True;
-  RndRect := TSkRoundRect.Create(R, CornerRadius, CornerRadius);
-  ACanvas.DrawRoundRect(RndRect, Paint);
-
-  if ZoomFactor > 1.01 then
-    ACanvas.Restore;
-
-  RedrawReason := rrNone;
-end;
-
-{==============================================================================
-  TMRXControls (Always zuiOverlay)
-==============================================================================}
-
-constructor TMRXControls.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
-begin
-  inherited;
-  ZIndex := zuiOverlay; // Force to front always
-end;
-
-procedure TMRXControls.Draw(const ACanvas: ISkCanvas);
-var
-  R: TRectF;
-  Paint: ISkPaint;
-  RndRect: ISkRoundRect;
-begin
-  R := RectF(0, 0, Size.Width, Size.Height);
-  Paint := TSkPaint.Create;
-  Paint.SetARGB(255, $40, $40, $40); // Dark gray for control bar
-  Paint.AntiAlias := True;
-  Paint.Alpha := 200; // Slightly solid
-  RndRect := TSkRoundRect.Create(R, CornerRadius, CornerRadius);
-  ACanvas.DrawRoundRect(RndRect, Paint);
-  RedrawReason := rrNone;
-end;
-
 
 {==============================================================================
   TMRXSkiaSurface
@@ -501,6 +574,7 @@ end;
 procedure TMRXSkiaSurface.Resize;
 begin
   inherited;
+  // Force a complete repaint when the control dimensions change
   ForceFullRedraw;
 end;
 
@@ -549,44 +623,50 @@ end;
 function TMRXSkiaSurface.GetObjectAtPos(const APoint: TPointF): TMRXDesktopObject;
 var
   i: Integer;
+  SortedObjects: TList<TMRXDesktopObject>;
 begin
   Result := nil;
   FObjectListLock.Acquire;
   try
-    // Iterate backwards because top-most visually is at the end of the list
-    for i := FObjects.Count - 1 downto 0 do
-    begin
-      if FObjects[i].Visible and FObjects[i].HitTest(APoint) then
+    // Create a temporary list sorted by Z-Order to respect visual layering
+    SortedObjects := TList<TMRXDesktopObject>.Create;
+    try
+      SortedObjects.AddRange(FObjects);
+      SortedObjects.Sort(TMRXObjectSorter.Create);
+
+      // Iterate from highest Z-Order down to lowest
+      for i := SortedObjects.Count - 1 downto 0 do
       begin
-        Result := FObjects[i];
-        Break;
+        if SortedObjects[i].Visible and SortedObjects[i].HitTest(APoint) then
+        begin
+          Result := SortedObjects[i];
+          Break;
+        end;
       end;
+    finally
+      SortedObjects.Free;
     end;
   finally
     FObjectListLock.Release;
   end;
 end;
 
-// --- HOVER & DRAG LOGIC ---
-
 procedure TMRXSkiaSurface.MouseMove(Shift: TShiftState; X: Single; Y: Single);
 begin
   inherited;
 
-  // Dragging has absolute priority
   if FIsDragging then
   begin
     var NewPos: TPointF := TPointF.Create(X - FDragOffset.X, Y - FDragOffset.Y);
-    if FDragObject is TMRXVideo then
-      TMRXVideo(FDragObject).TargetPosition := NewPos
-    else
-      FDragObject.Pos := NewPos;
 
+    // Direct position assignment for instant, lag-free mouse tracking
+    FDragObject.Pos := NewPos;
+    FDragObject.TargetPosition := NewPos; // Keep target in sync to prevent easing snap-back when released
     FDragObject.MarkDirty(rrDragged);
     Exit;
   end;
 
-  // Hover state updates
+  // Manage hover effects when not dragging
   if PtInRect(RectF(0, 0, Width, Height), TPointF.Create(X, Y)) then
     UpdateHoverState(X, Y)
   else
@@ -613,6 +693,7 @@ begin
   try
     for i := 0 to FObjects.Count - 1 do
     begin
+      // Trigger slight scale-up on the hovered module, reset others
       if FObjects[i] = HoveredObj then
         FObjects[i].HotZoomTarget := 1.06
       else
@@ -650,6 +731,7 @@ begin
   if Assigned(FDragObject) then
   begin
     FIsDragging := True;
+    // Store offset so the module doesn't snap its center to the cursor
     FDragOffset := TPointF.Create(X - FDragObject.Pos.X, Y - FDragObject.Pos.Y);
   end;
 end;
@@ -660,8 +742,6 @@ begin
   FIsDragging := False;
   FDragObject := nil;
 end;
-
-// --- THREADING & RENDERING ---
 
 procedure TMRXSkiaSurface.StartThread;
 begin
@@ -678,8 +758,18 @@ begin
       SleepTime: Integer;
       Snapshot: ISkImage;
       W, H: Integer;
+      SurfaceInfo: TSkImageInfo;
     begin
       LastTime := TThread.GetTickCount;
+
+      // 1. Try to initialize the GPU context (OpenGL) strictly inside this thread.
+      // If the user's graphics driver fails, this returns nil safely.
+      try
+        FGRContext := TGrDirectContext.MakeGL;
+      except
+        FGRContext := nil;
+      end;
+
       while not TThread.CheckTerminated do
       begin
         CurrentTime := TThread.GetTickCount;
@@ -691,9 +781,17 @@ begin
 
         if (W > 0) and (H > 0) and ((W <> FLastRenderedW) or (H <> FLastRenderedH)) then
         begin
-          FThreadSurface := TSkSurface.MakeRaster(W, H);
+          SurfaceInfo := TSkImageInfo.Create(W, H, TSkColorType.RGBA8888, TSkAlphaType.Premul);
+
+          // 2. Create the surface using the GPU context if we got one, otherwise pure CPU
+          if Assigned(FGRContext) then
+            FThreadSurface := TSkSurface.MakeRenderTarget(FGRContext, True, SurfaceInfo)
+          else
+            FThreadSurface := TSkSurface.MakeRaster(SurfaceInfo);
+
           FLastRenderedW := W;
           FLastRenderedH := H;
+
           if Assigned(FThreadSurface) then
             FThreadSurface.Canvas.Clear(Self.FDesktopColor);
         end;
@@ -705,7 +803,6 @@ begin
           if Assigned(FThreadSurface) then
           begin
             RenderDirtyObjects(TThread.GetTickCount / 1000.0, W, H);
-
             Snapshot := FThreadSurface.MakeImageSnapshot;
 
             FLock.Acquire;
@@ -725,6 +822,10 @@ begin
           SleepTime := 16;
         Sleep(SleepTime);
       end;
+
+      // 3. Cleanup GPU resources safely when the thread closes
+      FThreadSurface := nil;
+      FGRContext := nil; // Destroys the OpenGL context
       FThreadActive := False;
     end);
 
@@ -766,7 +867,10 @@ begin
   end;
 
   if Assigned(ImageToDraw) then
-    ACanvas.DrawImage(ImageToDraw, 0, 0, TSkSamplingOptions.Low)
+  begin
+    // Using High quality sampling here forces GPU acceleration for the final draw call
+    ACanvas.DrawImage(ImageToDraw, 0, 0, TSkSamplingOptions.High)
+  end
   else
   begin
     Paint := TSkPaint.Create;
@@ -788,11 +892,9 @@ begin
       begin
         FObjects[i].UpdateHotZoom(DeltaTime);
 
-        if FObjects[i].IsAnimating then
-        begin
-          if FObjects[i] is TMRXVideo then
-            TMRXVideo(FObjects[i]).UpdatePhysics(DeltaTime);
-        end;
+        // Continue processing physics if moving, or if it has continuous internal updates
+        if FObjects[i].IsAnimating or FObjects[i].FForcePhysicsUpdate then
+          FObjects[i].UpdatePhysics(DeltaTime);
       end;
     end;
   finally
@@ -804,54 +906,53 @@ procedure TMRXSkiaSurface.RenderDirtyObjects(const ATime: Double; AW, AH: Intege
 var
   i: Integer;
   Obj: TMRXDesktopObject;
-  NeedsFullRedraw: Boolean;
+  NeedsRedraw: Boolean;
   ClearPaint: ISkPaint;
   SortedObjects: TList<TMRXDesktopObject>;
 begin
-  ClearPaint := TSkPaint.Create;
-  ClearPaint.Style := TSkPaintStyle.Fill;
-  ClearPaint.Color := FDesktopColor;
-
-  NeedsFullRedraw := False;
-
+  NeedsRedraw := False;
   FObjectListLock.Acquire;
   try
     for i := 0 to FObjects.Count - 1 do
-    begin
       if FObjects[i].Visible and (FObjects[i].RedrawReason <> rrNone) then
       begin
-        NeedsFullRedraw := True;
+        NeedsRedraw := True;
         Break;
       end;
-    end;
 
-    if NeedsFullRedraw then
+    if NeedsRedraw then
     begin
-      // 1. Clear background
-      FThreadSurface.Canvas.DrawRect(RectF(0, 0, AW, AH), ClearPaint);
+      ClearPaint := TSkPaint.Create;
+      ClearPaint.Style := TSkPaintStyle.Fill;
+      ClearPaint.Color := FDesktopColor;
 
-      // 2. Draw wallpaper
+      // 1. Always clear and draw wallpaper (Safe and clean)
+      FThreadSurface.Canvas.DrawRect(RectF(0, 0, AW, AH), ClearPaint);
       if Assigned(FWallpaper) then
         FThreadSurface.Canvas.DrawImageRect(FWallpaper, RectF(0, 0, AW, AH), TSkSamplingOptions.High);
 
-      // 3. Sort objects by ZIndex to ensure correct layering
+      // 2. Draw all visible modules
       SortedObjects := TList<TMRXDesktopObject>.Create;
       try
         SortedObjects.AddRange(FObjects);
         SortedObjects.Sort(TMRXObjectSorter.Create);
 
-        // 4. Render sorted objects
         for i := 0 to SortedObjects.Count - 1 do
         begin
           Obj := SortedObjects[i];
           if Obj.Visible then
           begin
             FThreadSurface.Canvas.Save;
-            FThreadSurface.Canvas.Translate(Obj.Pos.X + (Obj.Size.Width / 2), Obj.Pos.Y + (Obj.Size.Height / 2));
+            FThreadSurface.Canvas.Translate(Obj.ActualPosition.X + (Obj.Size.Width / 2), Obj.ActualPosition.Y + (Obj.Size.Height / 2));
             FThreadSurface.Canvas.Scale(Obj.ActualHotZoom, Obj.ActualHotZoom);
             FThreadSurface.Canvas.Translate(-(Obj.Size.Width / 2), -(Obj.Size.Height / 2));
             try
-              Obj.Draw(FThreadSurface.Canvas);
+              // If the module has a pre-rendered cache (like Video), blit it directly
+              if Assigned(Obj.FRenderCache) then
+                FThreadSurface.Canvas.DrawImage(Obj.FRenderCache, 0, 0, TSkSamplingOptions.Low)
+              else
+                // Otherwise, fall back to standard live drawing
+                Obj.Draw(FThreadSurface.Canvas);
             finally
               FThreadSurface.Canvas.Restore;
             end;
@@ -897,301 +998,6 @@ begin
     FDesktopColor := Value;
     ForceFullRedraw;
   end;
-end;
-
-{==============================================================================
-  TMRXVideo
-==============================================================================}
-
-constructor TMRXVideo.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
-begin
-  inherited Create(ASurface, APos, ASize);
-  FActualPosition := APos;
-  FTargetPosition := APos;
-  FActualSize := ASize;
-  FTargetSize := ASize;
-  FHotZoom := 1.0;
-  FMediaPath := '';
-  FIsFullscreen := False;
-  FSmallRect := RectF(APos.X, APos.Y, APos.X + ASize.Width, APos.Y + ASize.Height);
-
-  ZIndex := zuiVideo; // Video is middle layer
-
-  FPipeline := TFFmpegPipeline.Create;
-  FIsPlaying := False;
-  FVolume := 1.0;
-end;
-
-destructor TMRXVideo.Destroy;
-begin
-  Stop;
-  FreeAndNil(FPipeline);
-  inherited;
-end;
-
-procedure TMRXVideo.SetTargetPosition(const Value: TPointF);
-begin
-  if FTargetPosition <> Value then
-  begin
-    FTargetPosition := Value;
-    IsAnimating := True;
-    MarkDirty(rrDragged);
-  end;
-end;
-
-procedure TMRXVideo.SetTargetSize(const Value: TSizeF);
-begin
-  if FTargetSize <> Value then
-  begin
-    FTargetSize := Value;
-    IsAnimating := True;
-    MarkDirty(rrFullscreen);
-  end;
-end;
-
-procedure TMRXVideo.SetHotZoom(Value: Single);
-begin
-  if Value < 0.1 then
-    Value := 0.1;
-  if not SameValue(FHotZoom, Value, 0.0001) then
-  begin
-    FHotZoom := Value;
-    IsAnimating := True;
-    MarkDirty(rrHotZoom);
-  end;
-end;
-
-procedure TMRXVideo.SetMediaPath(const Value: string);
-begin
-  if FMediaPath <> Value then
-  begin
-    FMediaPath := Value;
-    if FIsPlaying then
-      Stop;
-  end;
-end;
-
-procedure TMRXVideo.SetVolume(const Value: Single);
-begin
-  FVolume := EnsureRange(Value, 0.0, 1.0);
-end;
-
-procedure TMRXVideo.PlayMediaFile(const APath: string);
-begin
-  FMediaPath := APath;
-  if FPipeline.LoadMedia(APath) then
-  begin
-    FIsPlaying := True;
-    IsAnimating := True;
-    MarkDirty(rrInternal);
-  end
-  else
-  begin
-    FIsPlaying := False;
-  end;
-end;
-
-procedure TMRXVideo.Stop;
-begin
-  FPipeline.Close;
-  FIsPlaying := False;
-  FCurrentFrame := nil;
-  MarkDirty(rrInternal);
-end;
-
-procedure TMRXVideo.ToggleFullscreen;
-var
-  DesktopW, DesktopH: Single;
-begin
-  if not Assigned(Surface) then
-    Exit;
-  DesktopW := Surface.Width;
-  DesktopH := Surface.Height;
-
-  if not FIsFullscreen then
-  begin
-    FIsFullscreen := True;
-    FSmallRect := RectF(FActualPosition.X, FActualPosition.Y, FActualPosition.X + FActualSize.Width, FActualPosition.Y + FActualSize.Height);
-    TargetPosition := TPointF.Create(0, 0);
-    TargetSize := TSizeF.Create(DesktopW, DesktopH);
-  end
-  else
-  begin
-    FIsFullscreen := False;
-    TargetPosition := TPointF.Create(FSmallRect.Left, FSmallRect.Top);
-    TargetSize := TSizeF.Create(FSmallRect.Width, FSmallRect.Height);
-  end;
-end;
-
-procedure TMRXVideo.UpdatePhysics(const DeltaTime: Double);
-var
-  Speed, PosEpsilon, SizeEpsilon: Single;
-  MaxW, MaxH: Single;
-  NewW, NewH: Integer;
-begin
-  if FIsPlaying then
-  begin
-    NewW := Round(Size.Width);
-    NewH := Round(Size.Height);
-
-    if (FPipeline.Width <> NewW) or (FPipeline.Height <> NewH) then
-      FPipeline.ResizeTarget(NewW, NewH);
-
-    FCurrentFrame := FPipeline.GrabNextFrame();
-    if not Assigned(FCurrentFrame) then
-      FIsPlaying := False
-    else
-      MarkDirty(rrInternal);
-  end;
-
-  if Assigned(Surface) then
-  begin
-    MaxW := Surface.Width;
-    MaxH := Surface.Height;
-  end
-  else
-  begin
-    MaxW := 320;
-    MaxH := 240;
-  end;
-
-  Speed := 6.0 * DeltaTime;
-  PosEpsilon := 0.5;
-  SizeEpsilon := 1.0;
-
-  if not SameValue(FActualPosition.X, FTargetPosition.X, PosEpsilon) or not SameValue(FActualPosition.Y, FTargetPosition.Y, PosEpsilon) then
-  begin
-    FActualPosition.X := FActualPosition.X + (FTargetPosition.X - FActualPosition.X) * Speed;
-    FActualPosition.Y := FActualPosition.Y + (FTargetPosition.Y - FActualPosition.Y) * Speed;
-  end
-  else
-  begin
-    FActualPosition.X := FTargetPosition.X;
-    FActualPosition.Y := FTargetPosition.Y;
-  end;
-
-  if not SameValue(FActualSize.Width, FTargetSize.Width, SizeEpsilon) or not SameValue(FActualSize.Height, FTargetSize.Height, SizeEpsilon) then
-  begin
-    FActualSize.Width := FActualSize.Width + (FTargetSize.Width - FActualSize.Width) * Speed;
-    FActualSize.Height := FActualSize.Height + (FTargetSize.Height - FActualSize.Height) * Speed;
-  end
-  else
-  begin
-    FActualSize.Width := FTargetSize.Width;
-    FActualSize.Height := FTargetSize.Height;
-  end;
-
-  if FActualPosition.X < 0 then
-    FActualPosition.X := 0;
-  if FActualPosition.Y < 0 then
-    FActualPosition.Y := 0;
-  if FActualSize.Width > MaxW then
-    FActualSize.Width := MaxW;
-  if FActualSize.Height > MaxH then
-    FActualSize.Height := MaxH;
-
-  Pos := FActualPosition;
-  Size := FActualSize;
-
-  if SameValue(FActualPosition.X, FTargetPosition.X, PosEpsilon) and SameValue(FActualPosition.Y, FTargetPosition.Y, PosEpsilon) and SameValue(FActualSize.Width, FTargetSize.Width, SizeEpsilon) and SameValue(FActualSize.Height, FTargetSize.Height, SizeEpsilon) and (not FIsPlaying) then
-  begin
-    IsAnimating := False;
-  end;
-end;
-
-procedure TMRXVideo.Draw(const ACanvas: ISkCanvas);
-var
-  Paint: ISkPaint;
-  CenterX, CenterY: Single;
-  DrawRect: TRectF;
-  VideoAspect, TargetAspect: Single;
-  W, H: Single;
-  RndRect: ISkRoundRect;
-  ZoomFactor: Single;
-  ShadowFilter: ISkImageFilter;
-  LayerPaint: ISkPaint;
-  LayerBounds: TRectF;
-begin
-  CenterX := Size.Width / 2;
-  CenterY := Size.Height / 2;
-  ZoomFactor := ActualHotZoom;
-
-  RndRect := TSkRoundRect.Create(RectF(0, 0, Size.Width, Size.Height), CornerRadius, CornerRadius);
-
-  if ZoomFactor > 1.01 then
-  begin
-    LayerPaint := TSkPaint.Create;
-    LayerPaint.Color := TAlphaColors.White;
-    LayerPaint.Alpha := 255;
-
-    LayerBounds := RectF(0, 0, Size.Width, Size.Height);
-    LayerBounds.Inflate(60, 60);
-    ACanvas.SaveLayer(LayerBounds, LayerPaint);
-
-    ShadowFilter := TSkImageFilter.MakeDropShadow(0, (ZoomFactor - 1.0) * 60, (ZoomFactor - 1.0) * 50, (ZoomFactor - 1.0) * 50, TAlphaColors.Black, nil);
-
-    Paint := TSkPaint.Create;
-    Paint.ImageFilter := ShadowFilter;
-    Paint.Style := TSkPaintStyle.Fill;
-    Paint.Color := TAlphaColors.Black;
-    Paint.AntiAlias := True;
-
-    ACanvas.DrawRoundRect(RndRect, Paint);
-    ACanvas.ClipRoundRect(RndRect, TSkClipOp.Intersect, True);
-  end
-  else
-  begin
-    ACanvas.ClipRoundRect(RndRect, TSkClipOp.Intersect, True);
-  end;
-
-  Paint := TSkPaint.Create;
-  Paint.Style := TSkPaintStyle.Fill;
-  Paint.SetARGB(255, $00, $00, $00);
-  Paint.Alpha := FBackgroundAlpha;
-  Paint.AntiAlias := True;
-
-  ACanvas.Save;
-  try
-    ACanvas.Translate(CenterX, CenterY);
-    ACanvas.Scale(FHotZoom, FHotZoom);
-    ACanvas.Translate(-CenterX, -CenterY);
-
-    ACanvas.DrawRect(RectF(0, 0, Size.Width, Size.Height), Paint);
-
-    if Assigned(FCurrentFrame) and (FCurrentFrame.Width > 0) and (FCurrentFrame.Height > 0) then
-    begin
-      Paint.SetARGB(255, 255, 255, 255);
-      Paint.Alpha := 240;
-
-      VideoAspect := FCurrentFrame.Width / FCurrentFrame.Height;
-      TargetAspect := Size.Width / Size.Height;
-
-      if TargetAspect > VideoAspect then
-      begin
-        H := Size.Height;
-        W := H * VideoAspect;
-      end
-      else
-      begin
-        W := Size.Width;
-        H := W / VideoAspect;
-      end;
-
-      DrawRect := TRectF.Create((Size.Width - W) / 2, (Size.Height - H) / 2, (Size.Width + W) / 2, (Size.Height + H) / 2);
-
-      if (W > FCurrentFrame.Width) or (H > FCurrentFrame.Height) then
-        ACanvas.DrawImageRect(FCurrentFrame, DrawRect, TSkSamplingOptions.Create(TSkFilterMode.Nearest, TSkMipmapMode.None), Paint)
-      else
-        ACanvas.DrawImageRect(FCurrentFrame, DrawRect, TSkSamplingOptions.Low, Paint);
-    end;
-  finally
-    ACanvas.Restore;
-  end;
-
-  if ZoomFactor > 1.01 then
-    ACanvas.Restore;
-
-  RedrawReason := rrNone;
 end;
 
 end.
