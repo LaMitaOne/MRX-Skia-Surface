@@ -26,7 +26,8 @@ So far working:
 
  ----Latest Changes   
    v 0.2   
-    - Replaced static Enum Z-Indexing with dynamic Integer Z-Ordering.    
+    - Replaced static Enum Z-Indexing with dynamic Integer Z-Ordering. 
+    - Moved Modules in single unit.
     - Added logic to elevate modules to Z_ORDER_FULLSCREEN dynamically.    
     - Implemented precise Z-Order aware HitTesting for mouse interactions.    
     - Switched dragging from eased TargetPosition to direct 1:1 Pos tracking.    
