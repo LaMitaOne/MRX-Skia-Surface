@@ -5,13 +5,15 @@ interface
 uses
   System.SysUtils, System.Types, System.UITypes, System.Classes, System.Variants,
   FMX.Types, FMX.Controls, FMX.Forms, FMX.Graphics, FMX.Dialogs, uMRXSurface,
-  uMRXModules;
+  uMRXModules, uSkiaAliveHighlighter;
 
 type
   TFMaster = class(TForm)
     OpenDialog1: TOpenDialog;
+    Timer1: TTimer;
     procedure FormCreate(Sender: TObject);
     procedure FormShow(Sender: TObject);
+    procedure Timer1Timer(Sender: TObject);
   private
     MRXDesktop: TMRXSkiaSurface;
 
@@ -22,6 +24,7 @@ type
     CoverModul: TMRXCover;
     InfosModul: TMRXInfos;
     TopInfoModul: TMRXTopInfoModule;
+    FHighlighterModule: TMRXAliveHighlighterModule;
     procedure DesktopClick(Sender: TObject);
     procedure DesktopDblClick(Sender: TObject);
   public
@@ -52,6 +55,7 @@ begin
 
   // Create desktop modules and register them with the intro sequence handler
   VideoModul := TMRXVideo.Create(MRXDesktop, TPointF.Create(100, 80), TSizeF.Create(640, 360));
+  VideoModul.AllowFullscreen := True;
   MRXDesktop.AddObject(VideoModul);
   TopInfoModul.RegisterModuleForEntry(VideoModul);
 
@@ -64,16 +68,24 @@ begin
   TopInfoModul.RegisterModuleForEntry(AppIconModul);
 
   CoverModul := TMRXCover.Create(MRXDesktop, TPointF.Create(400, 500), TSizeF.Create(200, 200));
+  CoverModul.AllowFullscreen := True;
   MRXDesktop.AddObject(CoverModul);
   TopInfoModul.RegisterModuleForEntry(CoverModul);
 
   InfosModul := TMRXInfos.Create(MRXDesktop, TPointF.Create(800, 200), TSizeF.Create(250, 150));
+  InfosModul.AllowFullscreen := True;
   MRXDesktop.AddObject(InfosModul);
   TopInfoModul.RegisterModuleForEntry(InfosModul);
 
   ControlsModul := TMRXControls.Create(MRXDesktop, TPointF.Create(700, 650), TSizeF.Create(400, 50));
   MRXDesktop.AddObject(ControlsModul);
   TopInfoModul.RegisterModuleForEntry(ControlsModul);
+
+  FHighlighterModule := TMRXAliveHighlighterModule.Create(MRXDesktop, TPointF.Create(0, 0), TSizeF.Create(0, 0));
+  MRXDesktop.AddObject(FHighlighterModule);
+  FHighlighterModule.Highlighter.Style := asSnake; // asEnergyBeam oder asFirefly
+  FHighlighterModule.Highlighter.Color := TAlphaColors.Cyan;
+  FHighlighterModule.Highlighter.AllowMoodSwings := True; // Soll er den Mauscursor jagen?
 end;
 
 procedure TFMaster.DesktopClick(Sender: TObject);
@@ -110,6 +122,20 @@ procedure TFMaster.FormShow(Sender: TObject);
 begin
   // Execute the intro sequence after the form has finished sizing itself
   TopInfoModul.StartIntro;
+  //Timer1.Enabled := True;  //alive highlighter test- gest stuck atm often
+end;
+
+procedure TFMaster.Timer1Timer(Sender: TObject);
+var
+  TargetRect: TRectF;
+begin
+  Timer1.Enabled := False;
+  if not Assigned(FHighlighterModule) then
+    Exit;
+
+  TargetRect := TRectF.Create(InfosModul.Pos.X, InfosModul.Pos.Y, InfosModul.Pos.X + InfosModul.Size.Width, InfosModul.Pos.Y + InfosModul.Size.Height);
+
+  FHighlighterModule.Highlighter.SendToRect(TargetRect);
 end;
 
 end.

@@ -28,7 +28,8 @@ interface
 uses
   System.SysUtils, System.Types, System.Classes, System.Math, System.UITypes,
   FMX.Types, FMX.Controls, FMX.Graphics, FMX.Platform, FMX.Skia, System.Skia,
-  System.Generics.Collections, uMRXSurface, uFFmpegPipeline;
+  System.Generics.Collections, uMRXSurface, uFFmpegPipeline,
+  uSkiaAliveHighlighter;
 
 type
   { ==========================================================================
@@ -38,7 +39,6 @@ type
   public
     constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
     procedure Draw(const ACanvas: ISkCanvas); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
   end;
 
   { ==========================================================================
@@ -48,7 +48,6 @@ type
   public
     constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
     procedure Draw(const ACanvas: ISkCanvas); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
   end;
 
   { ==========================================================================
@@ -58,7 +57,6 @@ type
   public
     constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
     procedure Draw(const ACanvas: ISkCanvas); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
   end;
 
   { ==========================================================================
@@ -72,7 +70,6 @@ type
     constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
     procedure Draw(const ACanvas: ISkCanvas); override;
     procedure UpdateHotZoom(const DeltaTime: Double); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
 
     property SideBarMode: Boolean read FSideBarMode write SetSideBarMode default False;
   end;
@@ -85,8 +82,6 @@ type
     constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
     procedure Draw(const ACanvas: ISkCanvas); override;
     procedure UpdateHotZoom(const DeltaTime: Double); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
-    procedure ToggleFullscreen; override;
   end;
 
   { ==========================================================================
@@ -109,7 +104,6 @@ type
     destructor Destroy; override;
     procedure Draw(const ACanvas: ISkCanvas); override;
     procedure UpdatePhysics(const DeltaTime: Double); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
     procedure PlayMediaFile(const APath: string);
     procedure Stop;
 
@@ -134,12 +128,31 @@ type
     procedure Draw(const ACanvas: ISkCanvas); override;
     procedure UpdateHotZoom(const DeltaTime: Double); override;
     procedure UpdatePhysics(const DeltaTime: Double); override;
-    procedure ApplyDrag(const ANewPos: TPointF); override;
 
     // Queue modules to be animated in once the curtain opens
     procedure RegisterModuleForEntry(AModule: TMRXDesktopObject);
     procedure StartIntro;
     property IsIntroActive: Boolean read FIsIntroActive;
+  end;
+
+  { ==========================================================================
+    TMRXAliveHighlighterModule
+    ========================================================================== }
+  TMRXAliveHighlighterModule = class(TMRXDesktopObject)
+  private
+    FHighlighter: TAliveHighlighter;
+    FObstaclesCache: TArray<TObstacle>;
+    procedure BuildObstacleCache;
+  public
+    constructor Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF); override;
+    destructor Destroy; override;
+
+    procedure Draw(const ACanvas: ISkCanvas); override;
+    procedure UpdatePhysics(const DeltaTime: Double); override;
+    procedure UpdateHotZoom(const DeltaTime: Double); override;
+    procedure UpdateMousePosition(const AMousePos: TPointF); override;
+
+    property Highlighter: TAliveHighlighter read FHighlighter;
   end;
 
 implementation
@@ -151,6 +164,11 @@ implementation
 constructor TMRXAppIcon.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
 begin
   inherited;
+  // App icons are decorative elements, not meant to be dragged around
+  AllowDrag := False;
+  AllowFullscreen := False;
+  AllowRotation := False;
+
   // Hidden initially until the intro sequence reveals it
   Visible := False;
 end;
@@ -171,17 +189,17 @@ begin
   RedrawReason := rrNone;
 end;
 
-procedure TMRXAppIcon.ApplyDrag(const ANewPos: TPointF);
-begin
-  inherited;
-end;
-
 {==============================================================================
   TMRXCover
 ==============================================================================}
 constructor TMRXCover.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
 begin
   inherited;
+  // Cover art is static and shouldn't be dragged or scaled
+  AllowDrag := False;
+  AllowFullscreen := False;
+  AllowRotation := False;
+
   Visible := False;
 end;
 
@@ -201,17 +219,17 @@ begin
   RedrawReason := rrNone;
 end;
 
-procedure TMRXCover.ApplyDrag(const ANewPos: TPointF);
-begin
-  inherited;
-end;
-
 {==============================================================================
   TMRXInfos
 ==============================================================================}
 constructor TMRXInfos.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
 begin
   inherited;
+  // Information panels are layout-locked
+  AllowDrag := False;
+  AllowFullscreen := False;
+  AllowRotation := False;
+
   Visible := False;
 end;
 
@@ -231,17 +249,16 @@ begin
   RedrawReason := rrNone;
 end;
 
-procedure TMRXInfos.ApplyDrag(const ANewPos: TPointF);
-begin
-  inherited;
-end;
-
 {==============================================================================
   TMRXPlaylist
 ==============================================================================}
 constructor TMRXPlaylist.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
 begin
   inherited;
+  // Playlists shouldn't go fullscreen, but can be dragged (handled via SideBarMode)
+  AllowFullscreen := False;
+  AllowRotation := False;
+
   Visible := False;
 end;
 
@@ -250,6 +267,10 @@ begin
   if FSideBarMode <> Value then
   begin
     FSideBarMode := Value;
+
+    // Toggle dragging capability based on docking state
+    AllowDrag := not FSideBarMode;
+
     // Elevate above fullscreen elements when docked, drop to background when floating
     if FSideBarMode then
       FZOrder := Z_ORDER_SIDEBAR
@@ -266,13 +287,6 @@ begin
   if FSideBarMode then
     Exit;
   inherited;
-end;
-
-procedure TMRXPlaylist.ApplyDrag(const ANewPos: TPointF);
-begin
-  // Only allow repositioning when floating freely
-  if not FSideBarMode then
-    inherited;
 end;
 
 procedure TMRXPlaylist.Draw(const ACanvas: ISkCanvas);
@@ -328,6 +342,12 @@ constructor TMRXControls.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; 
 begin
   inherited;
   FZOrder := Z_ORDER_CONTROLS;
+
+  // Interface controls are strictly locked to their layout dimensions
+  AllowDrag := False;
+  AllowFullscreen := False;
+  AllowRotation := False;
+
   Visible := False;
 end;
 
@@ -335,16 +355,6 @@ procedure TMRXControls.UpdateHotZoom(const DeltaTime: Double);
 begin
   // Interface controls remain strictly static under the cursor
   Exit;
-end;
-
-procedure TMRXControls.ApplyDrag(const ANewPos: TPointF);
-begin
-  inherited;
-end;
-
-procedure TMRXControls.ToggleFullscreen;
-begin
-  // Interface controls are locked to their layout dimensions
 end;
 
 procedure TMRXControls.Draw(const ACanvas: ISkCanvas);
@@ -376,6 +386,10 @@ begin
   FIsPlaying := False;
   FVolume := 1.0;
   FForcePhysicsUpdate := False;
+
+  // Video can go fullscreen and be dragged, but usually not rotated
+  AllowRotation := False;
+
   Visible := False;
 end;
 
@@ -383,11 +397,6 @@ destructor TMRXVideo.Destroy;
 begin
   Stop;
   FreeAndNil(FPipeline);
-  inherited;
-end;
-
-procedure TMRXVideo.ApplyDrag(const ANewPos: TPointF);
-begin
   inherited;
 end;
 
@@ -566,6 +575,12 @@ begin
   inherited;
   FZOrder := Z_ORDER_TOPINFO;
 
+  // An overlay curtain cannot be manipulated by the user
+  AllowDrag := False;
+  AllowFullscreen := False;
+  AllowRotation := False;
+  AllowTransparent := False;
+
   // Start opaque to hide the desktop while modules load in the background
   FCurtainAlpha := 1.0;
   FIsIntroActive := False;
@@ -635,11 +650,6 @@ begin
   MarkDirty(rrInternal);
 end;
 
-procedure TMRXTopInfoModule.ApplyDrag(const ANewPos: TPointF);
-begin
-  // The top overlay layer is anchored to the screen and cannot be dragged
-end;
-
 procedure TMRXTopInfoModule.Draw(const ACanvas: ISkCanvas);
 var
   R: TRectF;
@@ -653,6 +663,100 @@ begin
     Paint.Color := TAlphaColors.Black;
     Paint.Alpha := Round(FCurtainAlpha * 255);
     ACanvas.DrawRect(R, Paint);
+  end;
+  RedrawReason := rrNone;
+end;
+
+{==============================================================================
+  TMRXAliveHighlighterModule
+==============================================================================}
+
+constructor TMRXAliveHighlighterModule.Create(ASurface: TMRXSkiaSurface; const APos: TPointF; const ASize: TSizeF);
+begin
+  inherited;
+  FZOrder := Z_ORDER_SIDEBAR;
+  CornerRadius := 0;
+  FBackgroundAlpha := 0;
+
+  // An autonomous AI entity ignores standard desktop interactions
+  AllowDrag := False;
+  AllowFullscreen := False;
+  AllowRotation := False;
+  AllowTransparent := False;
+
+  FHighlighter := TAliveHighlighter.Create;
+  // Pass the actual desktop dimensions immediately
+  if Assigned(Surface) then
+    FHighlighter.SetBounds(Surface.Width, Surface.Height);
+
+  FHighlighter.Active := False;
+  FForcePhysicsUpdate := True;
+  IsAnimating := True;
+  Visible := True;
+end;
+
+destructor TMRXAliveHighlighterModule.Destroy;
+begin
+  FHighlighter.Free;
+  inherited;
+end;
+
+procedure TMRXAliveHighlighterModule.UpdateMousePosition(const AMousePos: TPointF);
+begin
+  // Feed absolute screen coordinates to the highlighter for mouse interaction AI
+  FHighlighter.UpdateMousePos(AMousePos.X, AMousePos.Y);
+end;
+
+procedure TMRXAliveHighlighterModule.BuildObstacleCache;
+var
+  i, c: Integer;
+begin
+  if not Assigned(Surface) then
+    Exit;
+
+  c := 0;
+  SetLength(FObstaclesCache, Surface.Objects.Count);
+
+  for i := 0 to Surface.Objects.Count - 1 do
+  begin
+    if (Surface.Objects[i] <> Self) and (Surface.Objects[i].Visible) then
+    begin
+      FObstaclesCache[c].Rect := RectF(Surface.Objects[i].Pos.X, Surface.Objects[i].Pos.Y, Surface.Objects[i].Pos.X + Surface.Objects[i].Size.Width, Surface.Objects[i].Pos.Y + Surface.Objects[i].Size.Height);
+      Inc(c);
+    end;
+  end;
+  SetLength(FObstaclesCache, c);
+end;
+
+procedure TMRXAliveHighlighterModule.UpdatePhysics(const DeltaTime: Double);
+begin
+  inherited;
+
+  // Continuously update the actual surface dimensions (in case of window scaling)
+  if Assigned(Surface) then
+    FHighlighter.SetBounds(Surface.Width, Surface.Height);
+
+  BuildObstacleCache;
+  FHighlighter.Update(DeltaTime, FObstaclesCache);
+  MarkDirty(rrInternal);
+end;
+
+procedure TMRXAliveHighlighterModule.UpdateHotZoom(const DeltaTime: Double);
+begin
+  // Bypasses the surface's hover-zoom logic. The highlighter manages its own scaling.
+  Exit;
+end;
+
+procedure TMRXAliveHighlighterModule.Draw(const ACanvas: ISkCanvas);
+begin
+  ACanvas.Save;
+  try
+    // Reset the matrix so (0,0) is back at the top-left of the screen.
+    // The highlighter calculates absolute screen coordinates internally.
+    ACanvas.ResetMatrix();
+    FHighlighter.Draw(ACanvas);
+  finally
+    ACanvas.Restore;
   end;
   RedrawReason := rrNone;
 end;

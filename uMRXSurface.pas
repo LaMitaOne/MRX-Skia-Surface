@@ -13,10 +13,9 @@
   - Completely decoupled from the standard FMX layout engine to prevent flicker.
   - Thread-safe object management and backbuffer swapping.
   - Automated hover-state tracking with HotZoom physics.
-  - Zero-lag direct mouse dragging with precise offset tracking.
+  - Built-in smooth rotation and alpha interpolation physics.
 *******************************************************************************}
-{ MRX Desktop Environment v0.2 alpha                                            }
-{ Architecture & Rendering Core                                                 }
+
 {                                                                              }
 {------------------------------------------------------------------------------}
 { by Lara Miriam Tamy Reschke                                                  }
@@ -25,8 +24,18 @@
 { https://lamita.jimdosite.com                                                 }
 {                                                                              }
 {------------------------------------------------------------------------------}
+
 {
  ----Latest Changes
+   v 0.3
+    - Added feature toggle properties: AllowFullscreen, AllowDrag, AllowRotation,
+      AllowTransparent, AllowSidebarmode.
+    - Added TargetAlpha and Rotation properties with built-in smooth physics.
+    - Base class ApplyDrag and ToggleFullscreen now respect their Allow-flags.
+    - RenderDirtyObjects applies Rotation matrix and uses TargetAlpha globally.
+    - Added mouse position passthrough for overlay modules (e.g., AliveHighlighter).
+    - Added uSkiaAliveHighlighter integration (beasty gets stuck atm, but bascially working)
+
    v 0.2
     - Replaced static Enum Z-Indexing with dynamic Integer Z-Ordering.
     - Added logic to elevate modules to Z_ORDER_FULLSCREEN dynamically.
@@ -80,6 +89,13 @@ type
     FVisible: Boolean;
     FIsAnimating: Boolean;
     FCornerRadius: Single;
+
+    // New Feature Toggles
+    FAllowFullscreen: Boolean;
+    FAllowDrag: Boolean;
+    FAllowRotation: Boolean;
+    FAllowTransparent: Boolean;
+    FAllowSidebarmode: Boolean;
   protected
     FBackgroundAlpha: Byte;
     FActualHotZoom: Single;
@@ -106,6 +122,12 @@ type
     FTargetSize: TSizeF;
     FActualSize: TSizeF;
 
+    // New Physics State for Rotation and Alpha
+    FTargetAlpha: Single;
+    FActualAlpha: Single;
+    FTargetRotation: Single; // In degrees
+    FActualRotation: Single; // In degrees
+
     procedure SetTargetPosition(const Value: TPointF);
     procedure SetTargetSize(const Value: TSizeF);
 
@@ -122,6 +144,9 @@ type
     procedure UpdateHotZoom(const DeltaTime: Double); virtual;
     procedure UpdatePhysics(const DeltaTime: Double); virtual;
     procedure ApplyDrag(const ANewPos: TPointF); virtual;
+
+    // Hook for overlay modules to receive raw mouse coordinates
+    procedure UpdateMousePosition(const AMousePos: TPointF); virtual;
 
     // Modules override this to define where they sit when maximized
     function GetFullscreenZOrder: Integer; virtual;
@@ -152,6 +177,18 @@ type
     property TargetSize: TSizeF read FTargetSize write SetTargetSize;
     property ActualSize: TSizeF read FActualSize;
     property IsFullscreen: Boolean read FIsFullscreen;
+
+    // New Feature Toggle Properties
+    property AllowFullscreen: Boolean read FAllowFullscreen write FAllowFullscreen default True;
+    property AllowDrag: Boolean read FAllowDrag write FAllowDrag default True;
+    property AllowRotation: Boolean read FAllowRotation write FAllowRotation default True;
+    property AllowTransparent: Boolean read FAllowTransparent write FAllowTransparent default True;
+    property AllowSidebarmode: Boolean read FAllowSidebarmode write FAllowSidebarmode default True;
+
+    // New Animated Properties
+    property TargetAlpha: Single read FTargetAlpha write FTargetAlpha;
+    property ActualAlpha: Single read FActualAlpha;
+    property Rotation: Single read FTargetRotation write FTargetRotation; // Target in degrees
   end;
 
   { ==========================================================================
@@ -277,6 +314,19 @@ begin
   // Store initial bounds to restore from fullscreen later
   FIsFullscreen := False;
   FSmallRect := RectF(APos.X, APos.Y, APos.X + ASize.Width, APos.Y + ASize.Height);
+
+  // Initialize new feature toggles (all allowed by default)
+  FAllowFullscreen := True;
+  FAllowDrag := True;
+  FAllowRotation := True;
+  FAllowTransparent := True;
+  FAllowSidebarmode := True;
+
+  // Initialize new physics states
+  FTargetAlpha := 1.0; // Fully opaque by default
+  FActualAlpha := 1.0;
+  FTargetRotation := 0.0; // No rotation by default
+  FActualRotation := 0.0;
 end;
 
 destructor TMRXDesktopObject.Destroy;
@@ -374,6 +424,10 @@ procedure TMRXDesktopObject.ToggleFullscreen;
 var
   DesktopW, DesktopH: Single;
 begin
+  // Respect the feature toggle
+  if not FAllowFullscreen then
+    Exit;
+
   if not Assigned(Surface) then
     Exit;
   DesktopW := Surface.Width;
@@ -509,8 +563,36 @@ begin
   Pos := FActualPosition;
   Size := FActualSize;
 
+  // Phase 3: Smooth Alpha Interpolation
+  if FAllowTransparent then
+  begin
+    if not SameValue(FActualAlpha, FTargetAlpha, 0.01) then
+    begin
+      FActualAlpha := FActualAlpha + (FTargetAlpha - FActualAlpha) * (5.0 * DeltaTime);
+      if Abs(FActualAlpha - FTargetAlpha) < 0.01 then
+        FActualAlpha := FTargetAlpha;
+      MarkDirty(rrInternal);
+    end;
+  end
+  else
+    FActualAlpha := 1.0; // Force opaque if transparency is not allowed
+
+  // Phase 4: Smooth Rotation Interpolation
+  if FAllowRotation then
+  begin
+    if not SameValue(FActualRotation, FTargetRotation, 0.1) then
+    begin
+      FActualRotation := FActualRotation + (FTargetRotation - FActualRotation) * (5.0 * DeltaTime);
+      if Abs(FActualRotation - FTargetRotation) < 0.1 then
+        FActualRotation := FTargetRotation;
+      MarkDirty(rrInternal);
+    end;
+  end
+  else
+    FActualRotation := 0.0; // Force no rotation if not allowed
+
   // Conclude animation state unless a derived class requires continuous updates
-  if PosReached and SizeReached and not FForcePhysicsUpdate then
+  if PosReached and SizeReached and not FForcePhysicsUpdate and SameValue(FActualAlpha, FTargetAlpha, 0.01) and SameValue(FActualRotation, FTargetRotation, 0.1) then
     IsAnimating := False
   else
     MarkDirty(rrDragged);
@@ -518,6 +600,10 @@ end;
 
 procedure TMRXDesktopObject.ApplyDrag(const ANewPos: TPointF);
 begin
+  // Respect the feature toggle
+  if not FAllowDrag then
+    Exit;
+
   // Prevent dragging while expanded to fullscreen
   if FIsFullscreen then
     Exit;
@@ -528,6 +614,11 @@ begin
 
   TargetPosition := ANewPos;
   MarkDirty(rrDragged);
+end;
+
+procedure TMRXDesktopObject.UpdateMousePosition(const AMousePos: TPointF);
+begin
+  // Virtual hook for derived classes (e.g., passing coordinates to TAliveHighlighter)
 end;
 
 function TMRXDesktopObject.HitTest(const APoint: TPointF): Boolean;
@@ -698,6 +789,9 @@ begin
         FObjects[i].HotZoomTarget := 1.06
       else
         FObjects[i].HotZoomTarget := 1.0;
+
+      // Pass absolute mouse position to modules that need it (e.g. AliveHighlighter)
+      FObjects[i].UpdateMousePosition(P);
     end;
   finally
     FObjectListLock.Release;
@@ -909,6 +1003,8 @@ var
   NeedsRedraw: Boolean;
   ClearPaint: ISkPaint;
   SortedObjects: TList<TMRXDesktopObject>;
+  CenterX, CenterY: Single;
+  RadRotation: Single;
 begin
   NeedsRedraw := False;
   FObjectListLock.Acquire;
@@ -943,9 +1039,27 @@ begin
           if Obj.Visible then
           begin
             FThreadSurface.Canvas.Save;
-            FThreadSurface.Canvas.Translate(Obj.ActualPosition.X + (Obj.Size.Width / 2), Obj.ActualPosition.Y + (Obj.Size.Height / 2));
+
+            // Calculate center for translate and rotate
+            CenterX := Obj.ActualPosition.X + (Obj.Size.Width / 2);
+            CenterY := Obj.ActualPosition.Y + (Obj.Size.Height / 2);
+
+            // 1. Move origin to center of the module
+            FThreadSurface.Canvas.Translate(CenterX, CenterY);
+
+            // 2. Apply smooth rotation (convert degrees to radians)
+            if Obj.AllowRotation and not SameValue(Obj.FActualRotation, 0, 0.1) then
+            begin
+              RadRotation := DegToRad(Obj.FActualRotation);
+              FThreadSurface.Canvas.Rotate(RadRotation, 0, 0);
+            end;
+
+            // 3. Apply hover scale
             FThreadSurface.Canvas.Scale(Obj.ActualHotZoom, Obj.ActualHotZoom);
+
+            // 4. Move origin back to top-left corner for standard module drawing
             FThreadSurface.Canvas.Translate(-(Obj.Size.Width / 2), -(Obj.Size.Height / 2));
+
             try
               // If the module has a pre-rendered cache (like Video), blit it directly
               if Assigned(Obj.FRenderCache) then
