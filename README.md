@@ -25,9 +25,33 @@ So far working:
      Shadows   
      Z-Order layering  
      Entry animations 
-       
 
- ----Latest Changes   
+    
+requirements
+
+     Delphi (RAD Studio)
+     Skia4Delphi
+     FFmpeg DLLs v8.1 or newer (libavcodec, libavformat, libswscale, libavutil)
+   
+project and zipped sample exe included (but you need to get the dlls self, they are way too big :P)   
+
+   https://www.gyan.dev/ffmpeg/builds/    
+ - take those: ffmpeg-release-full-shared
+   
+ffmpeg units from:   
+   https://github.com/Laex/Delphi-FFMPEG
+     
+ ----Latest Changes    
+     
+   v 0.3     
+    - Added feature toggle properties: AllowFullscreen, AllowDrag, AllowRotation,    
+      AllowTransparent, AllowSidebarmode.    
+    - Added TargetAlpha and Rotation properties with built-in smooth physics.     
+    - Base class ApplyDrag and ToggleFullscreen now respect their Allow-flags.    
+    - RenderDirtyObjects applies Rotation matrix.    
+    - Added uSkiaAliveHighlighter integration (beasty gets stuck atm, but bascially working)   
+    - Added mouse position passthrough for overlay modules (e.g., AliveHighlighter).    
+    
    v 0.2   
     - Replaced static Enum Z-Indexing with dynamic Integer Z-Ordering.    
     - Moved Modules in single unit.   
@@ -44,17 +68,3 @@ So far working:
     - Stripped redundant physics code from TMRXVideo, now fully driven by base class.   
     - and i forgot what all else :D   
     
-    
-requirements
-
-     Delphi (RAD Studio)
-     Skia4Delphi
-     FFmpeg DLLs v8.1 or newer (libavcodec, libavformat, libswscale, libavutil)
-   
-project and zipped sample exe included (but you need to get the dlls self, they are way too big :P)   
-
-   https://www.gyan.dev/ffmpeg/builds/    
- - take those: ffmpeg-release-full-shared
-   
-ffmpeg units from:   
-   https://github.com/Laex/Delphi-FFMPEG
