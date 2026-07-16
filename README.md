@@ -49,7 +49,7 @@ ffmpeg units from:
     - Added TargetAlpha and Rotation properties with built-in smooth physics.     
     - Base class ApplyDrag and ToggleFullscreen now respect their Allow-flags.    
     - RenderDirtyObjects applies Rotation matrix.    
-    - Added uSkiaAliveHighlighter integration (beasty gets stuck atm, but bascially working)   
+    - Added uSkiaAliveHighlighter integration (beasty gets stuck atm, but basically working)   
     - Added mouse position passthrough for overlay modules (e.g., AliveHighlighter).    
     
    v 0.2   
